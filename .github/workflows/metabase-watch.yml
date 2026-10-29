@@ -72,7 +72,7 @@ jobs:
 
           # ------------------------------------------------------------
           # Security advisories
-          # Failles critiques publiées dans les 7 derniers jours
+          # Failles critiques publiées dans les 30 derniers jours
           # ------------------------------------------------------------
 
           ADVISORIES=$(curl -fsSL \
@@ -81,7 +81,7 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/metabase/metabase/security-advisories?state=published&sort=published&direction=desc&per_page=100")
 
-          LIMIT_DATE=$(date -d "7 days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
+          LIMIT_DATE=$(date -d "30 days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
 
           echo "$ADVISORIES" | jq --arg limit "$LIMIT_DATE" -r '
             .[]
@@ -126,13 +126,13 @@ jobs:
 
           # Security advisories
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "## 🔐 Failles critiques des 7 derniers jours" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🔐 Failles critiques des 30 derniers jours" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           if [ -s /tmp/advisories.txt ]; then
             cat /tmp/advisories.txt >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "✅ Aucune faille critique publiée au cours des 7 derniers jours." \
+            echo "✅ Aucune faille critique publiée au cours des 30 derniers jours." \
               >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -161,13 +161,13 @@ jobs:
             cat /tmp/hotfixes.txt
             echo ""
 
-            echo "Failles critiques des 7 derniers jours"
-            echo "---------------------------------------"
+            echo "Failles critiques des 30 derniers jours"
+            echo "----------------------------------------"
 
             if [ -s /tmp/advisories.txt ]; then
               cat /tmp/advisories.txt
             else
-              echo "Aucune faille critique publiée au cours des 7 derniers jours."
+              echo "Aucune faille critique publiée au cours des 30 derniers jours."
             fi
 
             echo ""
