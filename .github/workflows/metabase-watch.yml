@@ -186,5 +186,5 @@ jobs:
             --url "smtp://${SMTP_HOST}:${SMTP_PORT}" \
             --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
             --mail-from "${SMTP_USERNAME}" \
-            --mail-rcpt "support@signal-logement.beta.gouv.fr" \
+            --mail-rcpt "metabase@yopmail.fr" \
             --upload-file /tmp/email.txt
