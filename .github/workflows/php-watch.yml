@@ -1,0 +1,163 @@
+name: PHP Watch
+
+on:
+  schedule:
+    # Une fois par jour, en évitant le début d'heure
+    # Cron GitHub Actions en UTC
+    - cron: '37 7 * * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  php-watch:
+    name: Check PHP releases and security advisories
+    runs-on: ubuntu-latest
+
+    env:
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+
+    steps:
+      - name: Fetch PHP information
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # ------------------------------------------------------------
+          # Releases
+          # Dernière release stable de chaque branche PHP supportée
+          # ------------------------------------------------------------
+
+          RELEASES=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/php/php-src/releases?per_page=100")
+
+          echo "$RELEASES" | jq -r '
+            [
+              .[]
+              | select(.draft == false)
+              | select(.prerelease == false)
+              | select(.tag_name | test("^php-8\\.(2|3|4|5)\\.[0-9]+$"))
+              | {
+                  branch: (.tag_name | capture("^php-(?<branch>8\\.[0-9]+)\\.").branch),
+                  version: (.tag_name | sub("^php-"; "")),
+                  date: (.published_at | split("T")[0]),
+                  url: .html_url
+                }
+            ]
+            | group_by(.branch)
+            | map(sort_by(.date) | reverse | .[0])
+            | sort_by(.branch)
+            | reverse
+            | .[]
+            | "- PHP \(.version) — \(.date) — \(.url)"
+          ' > /tmp/releases.txt
+
+          # ------------------------------------------------------------
+          # Security advisories
+          # Failles High et Critical publiées dans les 30 derniers jours
+          # ------------------------------------------------------------
+
+          ADVISORIES=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/php/php-src/security-advisories?state=published&sort=published&direction=desc&per_page=100")
+
+          LIMIT_DATE=$(date -d "30 days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          echo "$ADVISORIES" | jq --arg limit "$LIMIT_DATE" -r '
+            .[]
+            | select(
+                (.severity == "critical" or .severity == "high")
+                and .published_at >= $limit
+              )
+            |
+              "- \(.ghsa_id) — \(.severity | ascii_upcase) — \(.summary)\n" +
+              "  Publiée le : \(.published_at | split("T")[0])\n" +
+              "  Versions affectées : " +
+              ([.vulnerabilities[].vulnerable_version_range] | join(", ")) +
+              "\n" +
+              "  Versions corrigées : " +
+              ([.vulnerabilities[].patched_versions // "Non précisée"] | join(", ")) +
+              "\n" +
+              "  \(.html_url)\n"
+          ' > /tmp/advisories.txt
+
+      - name: Generate GitHub summary
+        run: |
+          echo "# 🐘 PHP Watch" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Releases
+          echo "## 📦 Dernières versions PHP" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          sed -E \
+            's#^- PHP ([^ ]+) — ([^ ]+) — (.*)$#- [PHP \1](\3) — \2#' \
+            /tmp/releases.txt \
+            >> "$GITHUB_STEP_SUMMARY"
+
+          # Security advisories
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🔐 Failles High / Critical des 30 derniers jours" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s /tmp/advisories.txt ]; then
+            cat /tmp/advisories.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ Aucune faille High ou Critical publiée au cours des 30 derniers jours." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Generate email
+        if: ${{ env.SMTP_HOST != '' }}
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+        run: |
+          {
+            echo "From: PHP Watch <${SMTP_USERNAME}>"
+            echo "To: support@signal-logement.beta.gouv.fr"
+            echo "Subject: [PHP Watch] Bulletin de veille quotidien"
+            echo "Content-Type: text/plain; charset=UTF-8"
+            echo ""
+
+            echo "PHP WATCH"
+            echo ""
+
+            echo "Dernières versions PHP"
+            echo "-----------------------"
+            cat /tmp/releases.txt
+            echo ""
+
+            echo "Failles High / Critical des 30 derniers jours"
+            echo "----------------------------------------------"
+
+            if [ -s /tmp/advisories.txt ]; then
+              cat /tmp/advisories.txt
+            else
+              echo "Aucune faille High ou Critical publiée au cours des 30 derniers jours."
+            fi
+
+            echo ""
+            echo "Ce rapport est généré automatiquement par GitHub Actions."
+          } > /tmp/email.txt
+
+      - name: Notify team by email
+        if: ${{ env.SMTP_HOST != '' }}
+        env:
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: |
+          curl --fail --show-error --silent \
+            --ssl-reqd \
+            --url "smtp://${SMTP_HOST}:${SMTP_PORT}" \
+            --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
+            --mail-from "${SMTP_USERNAME}" \
+            --mail-rcpt ${{ secrets.MAIL_RECIPIENT }} \
+            --upload-file /tmp/email.txt
