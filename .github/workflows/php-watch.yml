@@ -153,11 +153,12 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_RECIPIENT: ${{ secrets.MAIL_RECIPIENT }}
         run: |
           curl --fail --show-error --silent \
             --ssl-reqd \
             --url "smtp://${SMTP_HOST}:${SMTP_PORT}" \
             --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
             --mail-from "${SMTP_USERNAME}" \
-            --mail-rcpt ${{ secrets.MAIL_RECIPIENT }} \
+            --mail-rcpt "${MAIL_RECIPIENT}" \
             --upload-file /tmp/email.txt
