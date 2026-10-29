@@ -51,13 +51,20 @@ jobs:
           # Versions Metabase de type v0.64.3.4
           # ------------------------------------------------------------
 
-          git ls-remote --tags https://github.com/metabase/metabase.git \
-            | sed 's#refs/tags/##' \
-            | sed 's/\^{}//' \
-            | awk '{print $2}' \
-            | grep -E '^v0\.[0-9]+\.[0-9]+\.[0-9]+$' \
-            | sort -Vu \
+          git clone \
+            --quiet \
+            --filter=blob:none \
+            --no-checkout \
+            https://github.com/metabase/metabase.git \
+            /tmp/metabase
+
+          git -C /tmp/metabase for-each-ref \
+            --sort=version:refname \
+            --format='%(refname:short)|%(creatordate:short)' \
+            refs/tags \
+            | grep -E '^v0\.[0-9]+\.[0-9]+\.[0-9]+\|' \
             | tail -20 \
+            | awk -F'|' '{print $1 " — " $2}' \
             > /tmp/hotfixes.txt
 
           # ------------------------------------------------------------
@@ -136,6 +143,7 @@ jobs:
             echo "Subject: [Metabase Watch] Bulletin de veille quotidien"
             echo "Content-Type: text/plain; charset=UTF-8"
             echo ""
+
             echo "METABASE WATCH"
             echo ""
 
