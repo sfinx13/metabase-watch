@@ -1,9 +1,9 @@
+
 name: PHP Watch
 
 on:
   schedule:
-    # Une fois par jour, en évitant le début d'heure
-    # Cron GitHub Actions en UTC
+    # Tous les jours à 07:37 UTC
     - cron: '37 7 * * *'
 
   workflow_dispatch:
@@ -20,29 +20,36 @@ jobs:
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
 
     steps:
-      - name: Fetch PHP information
+      # ------------------------------------------------------------
+      # 1. Releases PHP officielles
+      # ------------------------------------------------------------
+      - name: Fetch PHP releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # ------------------------------------------------------------
-          # Releases
-          # Dernière release stable de chaque branche PHP supportée
-          # ------------------------------------------------------------
+          set -euo pipefail
 
-          RELEASES=$(curl -fsSL \
+          curl -fsSL --retry 3 \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/php/php-src/releases?per_page=100")
+            "https://api.github.com/repos/php/php-src/releases?per_page=100" \
+            > /tmp/releases.json
 
-          echo "$RELEASES" | jq -r '
+          jq -r '
             [
               .[]
               | select(.draft == false)
               | select(.prerelease == false)
-              | select(.tag_name | test("^php-8\\.(2|3|4|5)\\.[0-9]+$"))
+              | select(
+                  .tag_name
+                  | test("^php-8\\.(2|3|4|5)\\.[0-9]+$")
+                )
               | {
-                  branch: (.tag_name | capture("^php-(?<branch>8\\.[0-9]+)\\.").branch),
+                  branch: (
+                    .tag_name
+                    | capture("^php-(?<branch>8\\.[0-9]+)\\.").branch
+                  ),
                   version: (.tag_name | sub("^php-"; "")),
                   date: (.published_at | split("T")[0]),
                   url: .html_url
@@ -54,88 +61,360 @@ jobs:
             | reverse
             | .[]
             | "- PHP \(.version) — \(.date) — \(.url)"
-          ' > /tmp/releases.txt
+          ' /tmp/releases.json > /tmp/releases.txt
 
-          # ------------------------------------------------------------
-          # Security advisories
-          # Failles High et Critical publiées dans les 30 derniers jours
-          # ------------------------------------------------------------
+      # ------------------------------------------------------------
+      # 2. Versions PHP disponibles sur Scalingo
+      # ------------------------------------------------------------
+      - name: Fetch Scalingo PHP versions
+        run: |
+          set -euo pipefail
 
-          ADVISORIES=$(curl -fsSL \
+          curl -fsSL --retry 3 \
+            "https://doc.scalingo.com/languages/php/start" \
+            -o /tmp/scalingo.html
+
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import re
+
+          class TableParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.tables = []
+                  self.table = None
+                  self.row = None
+                  self.cell = None
+
+              def handle_starttag(self, tag, attrs):
+                  if tag == "table":
+                      self.table = []
+                  elif tag == "tr" and self.table is not None:
+                      self.row = []
+                  elif tag in ("td", "th") and self.row is not None:
+                      self.cell = []
+
+              def handle_data(self, data):
+                  if self.cell is not None:
+                      self.cell.append(data)
+
+              def handle_endtag(self, tag):
+                  if tag in ("td", "th") and self.cell is not None:
+                      self.row.append(
+                          " ".join("".join(self.cell).split())
+                      )
+                      self.cell = None
+                  elif tag == "tr" and self.row is not None:
+                      self.table.append(self.row)
+                      self.row = None
+                  elif tag == "table" and self.table is not None:
+                      self.tables.append(self.table)
+                      self.table = None
+
+          parser = TableParser()
+          parser.feed(
+              Path("/tmp/scalingo.html").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          versions = {}
+
+          for table in parser.tables:
+              if not table:
+                  continue
+
+              headers = [
+                  cell.lower() for cell in table[0]
+              ]
+
+              if (
+                  not headers
+                  or "php version" not in headers[0]
+              ):
+                  continue
+
+              stacks = headers[1:]
+
+              for row in table[1:]:
+                  if not row:
+                      continue
+
+                  branch = row[0].strip()
+
+                  if not re.fullmatch(r"8\.[2-5]", branch):
+                      continue
+
+                  for stack, value in zip(
+                      stacks, row[1:]
+                  ):
+                      match = re.search(
+                          r"\b8\.\d+\.\d+\b", value
+                      )
+
+                      if match:
+                          versions.setdefault(
+                              branch, {}
+                          )[stack] = match.group(0)
+
+          if not versions:
+              raise SystemExit(
+                  "Aucune version PHP Scalingo trouvée"
+              )
+
+          # On conserve les versions par stack.
+          lines = []
+
+          for branch in sorted(
+              versions, reverse=True
+          ):
+              available = versions[branch]
+              unique = set(available.values())
+
+              if len(unique) == 1:
+                  version = next(iter(unique))
+                  lines.append(
+                      f"- PHP {branch} : {version} "
+                      "(toutes les stacks documentées)"
+                  )
+              else:
+                  for stack, version in sorted(
+                      available.items()
+                  ):
+                      lines.append(
+                          f"- PHP {branch} "
+                          f"({stack}) : {version}"
+                      )
+
+          Path("/tmp/scalingo-php.txt").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8"
+          )
+
+          # Format structuré pour comparaison
+          import json
+
+          Path("/tmp/scalingo-php.json").write_text(
+              json.dumps(versions, indent=2),
+              encoding="utf-8"
+          )
+          PY
+
+      # ------------------------------------------------------------
+      # 3. Comparaison PHP officiel / Scalingo
+      # ------------------------------------------------------------
+      - name: Compare PHP versions
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          official = {}
+
+          for line in Path(
+              "/tmp/releases.txt"
+          ).read_text().splitlines():
+              match = re.search(
+                  r"PHP (8\.\d+\.\d+)", line
+              )
+
+              if match:
+                  version = match.group(1)
+                  branch = ".".join(
+                      version.split(".")[:2]
+                  )
+                  official[branch] = version
+
+          scalingo = json.loads(
+              Path(
+                  "/tmp/scalingo-php.json"
+              ).read_text()
+          )
+
+          lines = []
+
+          for branch in sorted(
+              scalingo, reverse=True
+          ):
+              latest = official.get(branch)
+
+              if not latest:
+                  lines.append(
+                      f"- PHP {branch} : "
+                      "version officielle indisponible"
+                  )
+                  continue
+
+              for stack, available in sorted(
+                  scalingo[branch].items()
+              ):
+                  current = tuple(
+                      map(int, available.split("."))
+                  )
+                  target = tuple(
+                      map(int, latest.split("."))
+                  )
+
+                  if current < target:
+                      status = "MISE A JOUR EN ATTENTE"
+                  elif current == target:
+                      status = "A JOUR"
+                  else:
+                      status = (
+                          "VERSION SCALINGO PLUS RECENTE "
+                          "(source officielle a verifier)"
+                      )
+
+                  lines.append(
+                      f"- PHP {branch} ({stack}) : "
+                      f"officiel {latest} / "
+                      f"Scalingo {available} "
+                      f"— {status}"
+                  )
+
+          Path("/tmp/comparison.txt").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8"
+          )
+          PY
+
+      # ------------------------------------------------------------
+      # 4. Security advisories
+      # ------------------------------------------------------------
+      - name: Fetch PHP security advisories
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          curl -fsSL --retry 3 \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/php/php-src/security-advisories?state=published&sort=published&direction=desc&per_page=100")
+            "https://api.github.com/repos/php/php-src/security-advisories?state=published&sort=published&direction=desc&per_page=100" \
+            > /tmp/advisories.json
 
-          LIMIT_DATE=$(date -d "30 days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
+          LIMIT_DATE=$(date -u -d "30 days ago" \
+            +"%Y-%m-%dT%H:%M:%SZ")
 
-          echo "$ADVISORIES" | jq --arg limit "$LIMIT_DATE" -r '
+          jq --arg limit "$LIMIT_DATE" -r '
             .[]
             | select(
-                (.severity == "critical" or .severity == "high")
+                (.severity == "critical"
+                  or .severity == "high")
                 and .published_at >= $limit
               )
             |
-              "- \(.ghsa_id) — \(.severity | ascii_upcase) — \(.summary)\n" +
-              "  Publiée le : \(.published_at | split("T")[0])\n" +
-              "  Versions affectées : " +
-              ([.vulnerabilities[].vulnerable_version_range] | join(", ")) +
-              "\n" +
-              "  Versions corrigées : " +
-              ([.vulnerabilities[].patched_versions // "Non précisée"] | join(", ")) +
-              "\n" +
-              "  \(.html_url)\n"
-          ' > /tmp/advisories.txt
+              "- \(.ghsa_id) — \(.severity | ascii_upcase) — \(.summary)\n"
+              + "  Publiée le : \(.published_at | split("T")[0])\n"
+              + "  Versions affectées : "
+              + ([.vulnerabilities[]?.vulnerable_version_range] | join(", "))
+              + "\n"
+              + "  Versions corrigées : "
+              + ([.vulnerabilities[]? | (.patched_versions // "Non précisée")] | join(", "))
+              + "\n"
+              + "  \(.html_url)\n"
+          ' /tmp/advisories.json > /tmp/advisories.txt
 
+      # ------------------------------------------------------------
+      # 5. Résumé GitHub Actions
+      # ------------------------------------------------------------
       - name: Generate GitHub summary
         run: |
-          echo "# 🐘 PHP Watch" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "# 🐘 PHP Watch"
+            echo ""
+            echo "Rapport du $(date -u +%d/%m/%Y)"
+            echo ""
 
-          # Releases
-          echo "## 📦 Dernières versions PHP" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "## 📦 Dernières versions PHP officielles"
+            echo ""
 
-          sed -E \
-            's#^- PHP ([^ ]+) — ([^ ]+) — (.*)$#- [PHP \1](\3) — \2#' \
-            /tmp/releases.txt \
-            >> "$GITHUB_STEP_SUMMARY"
+            if [ -s /tmp/releases.txt ]; then
+              sed -E \
+                's#^- PHP ([^ ]+) — ([^ ]+) — (.*)$#- [PHP \1](\3) — \2#' \
+                /tmp/releases.txt
+            else
+              echo "Aucune release trouvée."
+            fi
 
-          # Security advisories
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "## 🔐 Failles High / Critical des 30 derniers jours" \
-            >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "## ☁️ Versions disponibles sur Scalingo"
+            echo ""
+            cat /tmp/scalingo-php.txt
+            echo ""
+            echo "[Documentation Scalingo](https://doc.scalingo.com/languages/php/start)"
 
-          if [ -s /tmp/advisories.txt ]; then
-            cat /tmp/advisories.txt >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "✅ Aucune faille High ou Critical publiée au cours des 30 derniers jours." \
-              >> "$GITHUB_STEP_SUMMARY"
-          fi
+            echo ""
+            echo "## 🔎 Comparaison PHP / Scalingo"
+            echo ""
+            cat /tmp/comparison.txt
 
+            echo ""
+            echo "## 🔐 Failles High / Critical des 30 derniers jours"
+            echo ""
+
+            if [ -s /tmp/advisories.txt ]; then
+              cat /tmp/advisories.txt
+            else
+              echo "✅ Aucune faille High ou Critical récente."
+            fi
+
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------
+      # 6. Génération de l'email quotidien
+      # ------------------------------------------------------------
       - name: Generate email
         if: ${{ env.SMTP_HOST != '' }}
         env:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          MAIL_RECIPIENT: ${{ secrets.MAIL_RECIPIENT }}
         run: |
           {
             echo "From: PHP Watch <${SMTP_USERNAME}>"
-            echo "To: support@signal-logement.beta.gouv.fr"
-            echo "Subject: [PHP Watch] Bulletin de veille quotidien"
+            echo "To: ${MAIL_RECIPIENT}"
+            echo "Subject: [PHP Watch] Bulletin quotidien - $(date -u +%Y-%m-%d)"
+            echo "MIME-Version: 1.0"
             echo "Content-Type: text/plain; charset=UTF-8"
             echo ""
 
             echo "PHP WATCH"
+            echo "========="
+            echo ""
+            echo "Rapport du $(date -u +%d/%m/%Y)"
             echo ""
 
-            echo "Dernières versions PHP"
-            echo "-----------------------"
-            cat /tmp/releases.txt
-            echo ""
+            echo "DERNIERES VERSIONS PHP OFFICIELLES"
+            echo "---------------------------------"
 
-            echo "Failles High / Critical des 30 derniers jours"
-            echo "----------------------------------------------"
+            if [ -s /tmp/releases.txt ]; then
+              cat /tmp/releases.txt
+            else
+              echo "Aucune release trouvée."
+            fi
+
+            echo ""
+            echo "VERSIONS PHP DISPONIBLES SUR SCALINGO"
+            echo "------------------------------------"
+            cat /tmp/scalingo-php.txt
+
+            echo ""
+            echo "COMPARAISON PHP / SCALINGO"
+            echo "-------------------------"
+            cat /tmp/comparison.txt
+
+            echo ""
+            echo "Source Scalingo :"
+            echo "https://doc.scalingo.com/languages/php/start"
+
+            echo ""
+            echo "FAILLES HIGH / CRITICAL - 30 DERNIERS JOURS"
+            echo "-------------------------------------------"
 
             if [ -s /tmp/advisories.txt ]; then
               cat /tmp/advisories.txt
@@ -144,9 +423,13 @@ jobs:
             fi
 
             echo ""
-            echo "Ce rapport est généré automatiquement par GitHub Actions."
+            echo "Rapport généré automatiquement par GitHub Actions."
+
           } > /tmp/email.txt
 
+      # ------------------------------------------------------------
+      # 7. Envoi quotidien par SMTP
+      # ------------------------------------------------------------
       - name: Notify team by email
         if: ${{ env.SMTP_HOST != '' }}
         env:
