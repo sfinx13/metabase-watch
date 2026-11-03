@@ -305,7 +305,8 @@ jobs:
             .[]
             | select(
                 (.severity == "critical"
-                  or .severity == "high")
+                  or .severity == "high"
+                  or .severity == "medium")
                 and .published_at >= $limit
               )
             |
