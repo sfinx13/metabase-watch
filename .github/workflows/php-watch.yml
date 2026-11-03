@@ -384,6 +384,9 @@ jobs:
             echo ""
 
             echo "PHP WATCH"
+            echo "========="
+            echo ""
+            echo "Rapport du $(date -u +%d/%m/%Y)"
             echo ""
 
             echo "DERNIERES VERSIONS PHP OFFICIELLES"
