@@ -356,13 +356,13 @@ jobs:
             cat /tmp/comparison.txt
 
             echo ""
-            echo "## 🔐 Failles High / Critical / Moderate des 30 derniers jours"
+            echo "## 🔐 Failles Moderate / High / Critical des 30 derniers jours"
             echo ""
 
             if [ -s /tmp/advisories.txt ]; then
               cat /tmp/advisories.txt
             else
-              echo "✅ Aucune faille High ou Critical ou Moderate récente."
+              echo "✅ Aucune faille Moderate ou High ou Critical récente."
             fi
 
           } >> "$GITHUB_STEP_SUMMARY"
