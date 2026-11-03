@@ -378,7 +378,7 @@ jobs:
           {
             echo "From: PHP Watch <${SMTP_USERNAME}>"
             echo "To: ${MAIL_RECIPIENT}"
-            echo "Subject: [PHP Watch] Bulletin quotidien - $(date -u +%Y-%m-%d)"
+            echo "Subject: [PHP Watch] Bulletin de veille quotidien - $(date -u +%Y-%m-%d)"
             echo "MIME-Version: 1.0"
             echo "Content-Type: text/plain; charset=UTF-8"
             echo ""

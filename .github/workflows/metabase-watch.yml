@@ -144,7 +144,7 @@ jobs:
           {
             echo "From: Metabase Watch <${SMTP_USERNAME}>"
             echo "To: support@signal-logement.beta.gouv.fr"
-            echo "Subject: [Metabase Watch] Bulletin de veille quotidien"
+            echo "Subject: [Metabase Watch] Bulletin de veille quotidien - $(date -u +%Y-%m-%d)"
             echo "Content-Type: text/plain; charset=UTF-8"
             echo ""
 
